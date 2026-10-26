@@ -515,6 +515,8 @@ fn test_cap_84_muxed_contract_storage_key_conversion() {
 // and muxed contract cases, which differ only in the address they feed in.
 fn check_muxed_address_is_not_allowed_as_storage_key(muxed_address: MuxedScAddress) {
     let host = Host::test_host_with_recording_footprint();
+    host.set_diagnostic_level(crate::DiagnosticLevel::Debug)
+        .unwrap();
     let contract_id = host.register_test_contract_wasm(CONTRACT_STORAGE_WITH_VALS);
     let muxed_address_val = host.add_host_object(muxed_address.clone()).unwrap();
     // A muxed address nested inside a container is not allowed as a storage
@@ -525,14 +527,17 @@ fn check_muxed_address_is_not_allowed_as_storage_key(muxed_address: MuxedScAddre
 
     let run_test = |storage: &str| {
         // Muxed address can't be used as a storage key, directly or nested.
+        let nested_put_res = host.call(
+            contract_id,
+            storage_fn_name(&host, "put", storage),
+            test_vec![&host, nested_key_val, 1234_u64].into(),
+        );
+        assert!(nested_put_res.as_ref().unwrap_err().info.is_some());
         assert!(HostError::result_matches_err(
-            host.call(
-                contract_id,
-                storage_fn_name(&host, "put", storage),
-                test_vec![&host, nested_key_val, 1234_u64].into(),
-            ),
+            nested_put_res,
             (ScErrorType::Storage, ScErrorCode::InvalidInput)
         ));
+        assert!(host.get_authenticated_authorizations().is_ok());
         if storage != "instance" {
             assert!(HostError::result_matches_err(
                 host.call(
@@ -559,14 +564,17 @@ fn check_muxed_address_is_not_allowed_as_storage_key(muxed_address: MuxedScAddre
             ));
         }
 
+        let put_res = host.call(
+            contract_id,
+            storage_fn_name(&host, "put", storage),
+            test_vec![&host, muxed_address_val, 1234_u64].into(),
+        );
+        assert!(put_res.as_ref().unwrap_err().info.is_some());
         assert!(HostError::result_matches_err(
-            host.call(
-                contract_id,
-                storage_fn_name(&host, "put", storage),
-                test_vec![&host, muxed_address_val, 1234_u64].into(),
-            ),
+            put_res,
             (ScErrorType::Storage, ScErrorCode::InvalidInput)
         ));
+        assert!(host.get_authenticated_authorizations().is_ok());
         // But it can be used as a value
         assert!(host
             .call(

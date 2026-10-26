@@ -291,11 +291,12 @@ impl ErrorHandler for Host {
             // an error as an event, below.
             if let Ok(mut events_refmut) = self.0.events.try_borrow_mut() {
                 self.record_err_diagnostics(events_refmut.deref_mut(), error, msg, args);
+                drop(events_refmut);
+                he = HostError {
+                    error,
+                    info: self.maybe_get_debug_info(),
+                };
             }
-            he = HostError {
-                error,
-                info: self.maybe_get_debug_info(),
-            };
             Ok(())
         });
         he

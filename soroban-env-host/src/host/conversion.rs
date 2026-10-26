@@ -420,8 +420,12 @@ impl Host {
         let _span = tracy_span!("Val to ScVal");
         *self.try_borrow_storage_key_conversion_active_mut()? = true;
         let scval_res = self.budget_cloned().with_limited_depth(|_| {
-            ScVal::try_from_val(self, &val)
-                .map_err(|cerr| self.error(cerr, "failed to convert host value to ScVal", &[val]))
+            ScVal::try_from_val(self, &val).map_err(|cerr| {
+                if let Ok(mut active) = self.try_borrow_storage_key_conversion_active_mut() {
+                    *active = false;
+                }
+                self.error(cerr, "failed to convert host value to ScVal", &[val])
+            })
         });
         *self.try_borrow_storage_key_conversion_active_mut()? = false;
         let scval = scval_res?;
@@ -522,6 +526,7 @@ impl Host {
                     HostObject::Address(addr) => ScVal::Address(addr.metered_clone(self)?),
                     HostObject::MuxedAddress(addr) => {
                         if *self.try_borrow_storage_key_conversion_active()? {
+                            *self.try_borrow_storage_key_conversion_active_mut()? = false;
                             return Err(self.err(
                                 ScErrorType::Storage,
                                 ScErrorCode::InvalidInput,
