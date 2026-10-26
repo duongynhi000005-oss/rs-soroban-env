@@ -346,6 +346,58 @@ fn test_create_contract_from_source_account() {
     create_contract_from_source_account(&test_host(), &ADD_I32);
 }
 
+#[test]
+fn test_create_existing_contract_error_outputs_contract_address() {
+    let host = test_host();
+    let source_account = generate_account_id(&host);
+    let salt = generate_bytes_array(&host);
+    let contract_id = create_contract_with_constructor(
+        &host,
+        source_account.clone(),
+        salt,
+        &ADD_I32,
+        &vec![],
+        Default::default(),
+    )
+    .unwrap();
+
+    // Attempt to deploy the exact same contract a second time.
+    let (expected_id, contract_id_preimage) = get_contract_id(&host, source_account, salt);
+    assert_eq!(contract_id, expected_id);
+
+    let wasm_hash = Hash(Sha256::digest(&ADD_I32).try_into().unwrap());
+    let params = CreateContractTestParams::default();
+    let host_fn = params.create_host_fn(&contract_id_preimage, &wasm_hash, &vec![]);
+    let auth_invocation = params.create_auth_invocation(&contract_id_preimage, &wasm_hash, &vec![]);
+    host.set_authorization_entries(vec![SorobanAuthorizationEntry {
+        credentials: SorobanCredentials::SourceAccount,
+        root_invocation: auth_invocation,
+    }])
+    .unwrap();
+
+    let res = host.invoke_function(host_fn);
+    assert!(HostError::result_matches_err(
+        res,
+        (ScErrorType::Storage, ScErrorCode::ExistingValue)
+    ));
+
+    let events = host.get_events().unwrap().0;
+    let last_event = events.last().expect("expected diagnostic error event");
+    assert_eq!(last_event.event.type_, ContractEventType::Diagnostic);
+    let ContractEventBody::V0(body) = &last_event.event.body;
+    assert_eq!(
+        body.data,
+        ScVal::Vec(Some(
+            vec![
+                ScVal::String(xdr::ScString("contract already exists".try_into().unwrap())),
+                ScVal::Address(ScAddress::Contract(contract_id)),
+            ]
+            .try_into()
+            .unwrap()
+        ))
+    );
+}
+
 pub(crate) fn sha256_hash_id_preimage<T: xdr::WriteXdr>(pre_image: T) -> xdr::Hash {
     let mut buf = Limited::new(Vec::new(), DEFAULT_XDR_RW_LIMITS);
     pre_image
