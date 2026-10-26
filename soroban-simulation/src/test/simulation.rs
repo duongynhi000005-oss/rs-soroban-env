@@ -989,7 +989,7 @@ fn test_simulate_extend_ttl_op() {
     );
 
     // Extending expired entries is not allowed.
-    let mut ledger_info_with_increased_ledger_seq = ledger_info;
+    let mut ledger_info_with_increased_ledger_seq = ledger_info.clone();
     ledger_info_with_increased_ledger_seq.sequence_number += 101;
     assert!(simulate_extend_ttl_op(
         &snapshot_source,
@@ -1000,6 +1000,34 @@ fn test_simulate_extend_ttl_op() {
         100_001,
     )
     .is_err());
+
+    // Extending up to max_entry_ttl - 1 is allowed.
+    assert!(simulate_extend_ttl_op(
+        &snapshot_source,
+        &network_config,
+        &SimulationAdjustmentConfig::no_adjustments(),
+        &ledger_info,
+        &keys,
+        ledger_info.max_entry_ttl - 1,
+    )
+    .is_ok());
+
+    // Extending past max_entry_ttl - 1 or overflowing u32::MAX must return an error.
+    for invalid_extend_to in [
+        ledger_info.max_entry_ttl,
+        u32::MAX - ledger_info.sequence_number + 1,
+        u32::MAX,
+    ] {
+        assert!(simulate_extend_ttl_op(
+            &snapshot_source,
+            &network_config,
+            &SimulationAdjustmentConfig::no_adjustments(),
+            &ledger_info,
+            &keys,
+            invalid_extend_to,
+        )
+        .is_err());
+    }
 }
 
 #[test]

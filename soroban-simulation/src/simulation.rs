@@ -234,7 +234,7 @@ pub fn simulate_extend_ttl_op(
         keys_to_extend,
         &snapshot_source,
         network_config,
-        ledger_info.sequence_number,
+        ledger_info,
         extend_to,
     )?;
     let operation = OperationBody::ExtendFootprintTtl(ExtendFootprintTtlOp {
