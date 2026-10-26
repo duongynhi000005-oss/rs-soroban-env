@@ -4553,3 +4553,473 @@ mod cap_73 {
         assert_eq!(source_account.balance, 100_000_000 - transfer_amount as i64);
     }
 }
+
+#[test]
+fn test_sac_sep41_events_issued_asset() {
+    let test = StellarAssetContractTest::setup(function_name!());
+    // Enable invocation metering so contract events are reset before each call.
+    test.host.enable_invocation_metering();
+
+    let issuer = TestSigner::account(&test.issuer_key);
+    let user = TestSigner::account(&test.user_key);
+    let user_2 = TestSigner::account(&test.user_key_2);
+    let spender = TestSigner::account(&test.user_key_3);
+
+    test.create_default_account(&user);
+    test.create_default_account(&user_2);
+    test.create_default_account(&spender);
+    test.create_default_trustline(&user);
+    test.create_default_trustline(&user_2);
+    test.create_default_trustline(&spender);
+
+    let contract = test.default_stellar_asset_contract();
+    let token_name = contract.name().unwrap();
+
+    let sym = |s: &str| Symbol::try_from_val(&test.host, &s).unwrap().to_val();
+
+    // 1. `mint` event: topics = ["mint", to, sep0011_asset], data = amount (i128)
+    contract
+        .mint(&issuer, user.address(&test.host), 1_000)
+        .unwrap();
+    assert_eq!(
+        test.host.get_contract_events().unwrap().0,
+        vec![contract.test_event(
+            test_vec![
+                &test.host,
+                sym("mint"),
+                user.address(&test.host),
+                &token_name,
+            ],
+            1_000_i128.try_into_val(&test.host).unwrap(),
+        )]
+    );
+
+    // 2. `approve` event: topics = ["approve", from, spender, sep0011_asset], data = [amount, live_until_ledger]
+    contract
+        .approve(&user, spender.address(&test.host), 600, 250)
+        .unwrap();
+    assert_eq!(
+        test.host.get_contract_events().unwrap().0,
+        vec![contract.test_event(
+            test_vec![
+                &test.host,
+                sym("approve"),
+                user.address(&test.host),
+                spender.address(&test.host),
+                &token_name,
+            ],
+            test_vec![&test.host, 600_i128, 250_u32].into(),
+        )]
+    );
+
+    // 3. `transfer` event (regular): topics = ["transfer", from, to, sep0011_asset], data = amount (i128)
+    contract
+        .transfer(&user, user_2.address(&test.host), 150)
+        .unwrap();
+    assert_eq!(
+        test.host.get_contract_events().unwrap().0,
+        vec![contract.test_event(
+            test_vec![
+                &test.host,
+                sym("transfer"),
+                user.address(&test.host),
+                user_2.address(&test.host),
+                &token_name,
+            ],
+            150_i128.try_into_val(&test.host).unwrap(),
+        )]
+    );
+
+    // 4. `transfer` event (self-transfer): topics = ["transfer", user, user, sep0011_asset], data = amount (i128)
+    contract
+        .transfer(&user, user.address(&test.host), 50)
+        .unwrap();
+    assert_eq!(
+        test.host.get_contract_events().unwrap().0,
+        vec![contract.test_event(
+            test_vec![
+                &test.host,
+                sym("transfer"),
+                user.address(&test.host),
+                user.address(&test.host),
+                &token_name,
+            ],
+            50_i128.try_into_val(&test.host).unwrap(),
+        )]
+    );
+
+    // 5. `transfer_from` event (regular): emits a "transfer" event with topics = ["transfer", from, to, sep0011_asset], data = amount (i128)
+    contract
+        .transfer_from(
+            &spender,
+            user.address(&test.host),
+            user_2.address(&test.host),
+            200,
+        )
+        .unwrap();
+    assert_eq!(
+        test.host.get_contract_events().unwrap().0,
+        vec![contract.test_event(
+            test_vec![
+                &test.host,
+                sym("transfer"),
+                user.address(&test.host),
+                user_2.address(&test.host),
+                &token_name,
+            ],
+            200_i128.try_into_val(&test.host).unwrap(),
+        )]
+    );
+
+    // 6. `transfer_from` event (self-transfer): emits a "transfer" event with topics = ["transfer", user, user, sep0011_asset], data = amount (i128)
+    contract
+        .transfer_from(
+            &spender,
+            user.address(&test.host),
+            user.address(&test.host),
+            75,
+        )
+        .unwrap();
+    assert_eq!(
+        test.host.get_contract_events().unwrap().0,
+        vec![contract.test_event(
+            test_vec![
+                &test.host,
+                sym("transfer"),
+                user.address(&test.host),
+                user.address(&test.host),
+                &token_name,
+            ],
+            75_i128.try_into_val(&test.host).unwrap(),
+        )]
+    );
+
+    // 7. `transfer_from` to issuer (`to == issuer && from != to`): emits a "burn" event with topics = ["burn", from, sep0011_asset], data = amount (i128)
+    contract
+        .transfer_from(
+            &spender,
+            user.address(&test.host),
+            issuer.address(&test.host),
+            125,
+        )
+        .unwrap();
+    assert_eq!(
+        test.host.get_contract_events().unwrap().0,
+        vec![contract.test_event(
+            test_vec![
+                &test.host,
+                sym("burn"),
+                user.address(&test.host),
+                &token_name,
+            ],
+            125_i128.try_into_val(&test.host).unwrap(),
+        )]
+    );
+
+    // 8. `transfer_from` from issuer (`from == issuer && from != to`): emits a "mint" event with topics = ["mint", to, sep0011_asset], data = amount (i128)
+    contract
+        .approve(&issuer, spender.address(&test.host), 500, 250)
+        .unwrap();
+    contract
+        .transfer_from(
+            &spender,
+            issuer.address(&test.host),
+            user.address(&test.host),
+            300,
+        )
+        .unwrap();
+    assert_eq!(
+        test.host.get_contract_events().unwrap().0,
+        vec![contract.test_event(
+            test_vec![
+                &test.host,
+                sym("mint"),
+                user.address(&test.host),
+                &token_name,
+            ],
+            300_i128.try_into_val(&test.host).unwrap(),
+        )]
+    );
+
+    // 9. `transfer_from` from issuer to issuer (`from == issuer && to == issuer`): emits a "transfer" event
+    contract
+        .transfer_from(
+            &spender,
+            issuer.address(&test.host),
+            issuer.address(&test.host),
+            100,
+        )
+        .unwrap();
+    assert_eq!(
+        test.host.get_contract_events().unwrap().0,
+        vec![contract.test_event(
+            test_vec![
+                &test.host,
+                sym("transfer"),
+                issuer.address(&test.host),
+                issuer.address(&test.host),
+                &token_name,
+            ],
+            100_i128.try_into_val(&test.host).unwrap(),
+        )]
+    );
+
+    // 10. `burn` event: topics = ["burn", from, sep0011_asset], data = amount (i128)
+    contract.burn(&user, 80).unwrap();
+    assert_eq!(
+        test.host.get_contract_events().unwrap().0,
+        vec![contract.test_event(
+            test_vec![
+                &test.host,
+                sym("burn"),
+                user.address(&test.host),
+                &token_name,
+            ],
+            80_i128.try_into_val(&test.host).unwrap(),
+        )]
+    );
+
+    // 11. `burn_from` event: emits a "burn" event with topics = ["burn", from, sep0011_asset], data = amount (i128)
+    contract
+        .burn_from(&spender, user.address(&test.host), 120)
+        .unwrap();
+    assert_eq!(
+        test.host.get_contract_events().unwrap().0,
+        vec![contract.test_event(
+            test_vec![
+                &test.host,
+                sym("burn"),
+                user.address(&test.host),
+                &token_name,
+            ],
+            120_i128.try_into_val(&test.host).unwrap(),
+        )]
+    );
+
+    // 12. `clawback` event: topics = ["clawback", from, sep0011_asset], data = amount (i128)
+    contract
+        .clawback(&issuer, user.address(&test.host), 90)
+        .unwrap();
+    assert_eq!(
+        test.host.get_contract_events().unwrap().0,
+        vec![contract.test_event(
+            test_vec![
+                &test.host,
+                sym("clawback"),
+                user.address(&test.host),
+                &token_name,
+            ],
+            90_i128.try_into_val(&test.host).unwrap(),
+        )]
+    );
+
+    // 13. `set_authorized` event: topics = ["set_authorized", id, sep0011_asset], data = authorize (bool)
+    contract
+        .set_authorized(&issuer, user.address(&test.host), false)
+        .unwrap();
+    assert_eq!(
+        test.host.get_contract_events().unwrap().0,
+        vec![contract.test_event(
+            test_vec![
+                &test.host,
+                sym("set_authorized"),
+                user.address(&test.host),
+                &token_name,
+            ],
+            false.try_into_val(&test.host).unwrap(),
+        )]
+    );
+
+    contract
+        .set_authorized(&issuer, user.address(&test.host), true)
+        .unwrap();
+    assert_eq!(
+        test.host.get_contract_events().unwrap().0,
+        vec![contract.test_event(
+            test_vec![
+                &test.host,
+                sym("set_authorized"),
+                user.address(&test.host),
+                &token_name,
+            ],
+            true.try_into_val(&test.host).unwrap(),
+        )]
+    );
+
+    // 14. `set_admin` event: topics = ["set_admin", current_admin, sep0011_asset], data = new_admin (Address)
+    contract
+        .set_admin(&issuer, user_2.address(&test.host))
+        .unwrap();
+    assert_eq!(
+        test.host.get_contract_events().unwrap().0,
+        vec![contract.test_event(
+            test_vec![
+                &test.host,
+                sym("set_admin"),
+                issuer.address(&test.host),
+                &token_name,
+            ],
+            user_2.address(&test.host).try_into_val(&test.host).unwrap(),
+        )]
+    );
+
+    // Restore admin back to issuer and verify `set_admin` event reflects user_2 as old admin.
+    contract
+        .set_admin(&user_2, issuer.address(&test.host))
+        .unwrap();
+    assert_eq!(
+        test.host.get_contract_events().unwrap().0,
+        vec![contract.test_event(
+            test_vec![
+                &test.host,
+                sym("set_admin"),
+                user_2.address(&test.host),
+                &token_name,
+            ],
+            issuer.address(&test.host).try_into_val(&test.host).unwrap(),
+        )]
+    );
+
+    // 15. Failed SAC calls must not emit any events.
+    assert!(contract
+        .transfer(&user, user_2.address(&test.host), 999_999_999)
+        .is_err());
+    assert!(test.host.get_contract_events().unwrap().0.is_empty());
+
+    assert!(contract
+        .transfer_from(
+            &spender,
+            user.address(&test.host),
+            user_2.address(&test.host),
+            999_999,
+        )
+        .is_err());
+    assert!(test.host.get_contract_events().unwrap().0.is_empty());
+
+    assert!(contract
+        .clawback(&issuer, user.address(&test.host), 999_999_999)
+        .is_err());
+    assert!(test.host.get_contract_events().unwrap().0.is_empty());
+}
+
+#[test]
+fn test_sac_sep41_events_native_asset() {
+    let test = StellarAssetContractTest::setup(function_name!());
+    test.host.enable_invocation_metering();
+
+    let user = TestSigner::account(&test.user_key);
+    let user_2 = TestSigner::account(&test.user_key_2);
+    let spender = TestSigner::account(&test.user_key_3);
+
+    test.create_account_with_balance(&user, 100_000_000);
+    test.create_account_with_balance(&user_2, 50_000_000);
+    test.create_account_with_balance(&spender, 50_000_000);
+
+    let contract = test.native_contract();
+    let token_name = contract.name().unwrap();
+    assert_eq!(token_name.to_string(), "native");
+
+    let sym = |s: &str| Symbol::try_from_val(&test.host, &s).unwrap().to_val();
+
+    // 1. `approve` event on native asset
+    contract
+        .approve(&user, spender.address(&test.host), 10_000_000, 300)
+        .unwrap();
+    assert_eq!(
+        test.host.get_contract_events().unwrap().0,
+        vec![contract.test_event(
+            test_vec![
+                &test.host,
+                sym("approve"),
+                user.address(&test.host),
+                spender.address(&test.host),
+                &token_name,
+            ],
+            test_vec![&test.host, 10_000_000_i128, 300_u32].into(),
+        )]
+    );
+
+    // 2. `transfer` event on native asset (regular and self-transfer)
+    contract
+        .transfer(&user, user_2.address(&test.host), 2_000_000)
+        .unwrap();
+    assert_eq!(
+        test.host.get_contract_events().unwrap().0,
+        vec![contract.test_event(
+            test_vec![
+                &test.host,
+                sym("transfer"),
+                user.address(&test.host),
+                user_2.address(&test.host),
+                &token_name,
+            ],
+            2_000_000_i128.try_into_val(&test.host).unwrap(),
+        )]
+    );
+
+    contract
+        .transfer(&user, user.address(&test.host), 1_000_000)
+        .unwrap();
+    assert_eq!(
+        test.host.get_contract_events().unwrap().0,
+        vec![contract.test_event(
+            test_vec![
+                &test.host,
+                sym("transfer"),
+                user.address(&test.host),
+                user.address(&test.host),
+                &token_name,
+            ],
+            1_000_000_i128.try_into_val(&test.host).unwrap(),
+        )]
+    );
+
+    // 3. `transfer_from` event on native asset (regular and self-transfer)
+    contract
+        .transfer_from(
+            &spender,
+            user.address(&test.host),
+            user_2.address(&test.host),
+            3_000_000,
+        )
+        .unwrap();
+    assert_eq!(
+        test.host.get_contract_events().unwrap().0,
+        vec![contract.test_event(
+            test_vec![
+                &test.host,
+                sym("transfer"),
+                user.address(&test.host),
+                user_2.address(&test.host),
+                &token_name,
+            ],
+            3_000_000_i128.try_into_val(&test.host).unwrap(),
+        )]
+    );
+
+    contract
+        .transfer_from(
+            &spender,
+            user.address(&test.host),
+            user.address(&test.host),
+            1_500_000,
+        )
+        .unwrap();
+    assert_eq!(
+        test.host.get_contract_events().unwrap().0,
+        vec![contract.test_event(
+            test_vec![
+                &test.host,
+                sym("transfer"),
+                user.address(&test.host),
+                user.address(&test.host),
+                &token_name,
+            ],
+            1_500_000_i128.try_into_val(&test.host).unwrap(),
+        )]
+    );
+
+    // 4. Unsupported `burn` on native asset fails and emits no events.
+    assert!(contract.burn(&user, 100).is_err());
+    assert!(test.host.get_contract_events().unwrap().0.is_empty());
+}
