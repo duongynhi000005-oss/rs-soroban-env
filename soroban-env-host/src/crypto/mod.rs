@@ -362,7 +362,13 @@ impl Host {
         self.metered_scalar_vec_to_vecobj(output)
     }
 
-    /// Generic implementation of Poseidon2 permutation for any field type
+    /// Generic implementation of Poseidon2 permutation for any field type.
+    ///
+    /// Note: For state sizes `t = 2` and `t = 3`, the internal matrix is fixed to
+    /// `[[2, 1], [1, 3]]` and `[[2, 1, 1], [1, 2, 1], [1, 1, 3]]` respectively for
+    /// performance optimization. Thus, while `mat_internal_diag_m_1` must still be a
+    /// valid `Vec<Scalar>` of length `t`, its element values are ignored during the
+    /// internal linear layer when `t in {2, 3}`.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn poseidon2_permutation_impl<S>(
         &self,

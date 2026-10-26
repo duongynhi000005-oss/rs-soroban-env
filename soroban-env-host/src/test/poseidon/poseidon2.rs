@@ -450,6 +450,96 @@ fn test_poseidon2_mismatching_field_types() -> Result<(), HostError> {
     Ok(())
 }
 
+#[test]
+fn test_poseidon2_fixed_internal_matrix_for_t_2_and_3() -> Result<(), HostError> {
+    use crate::test::poseidon::poseidon2_instance_bls12::{
+        POSEIDON2_BLS_2_PARAMS, POSEIDON2_BLS_3_PARAMS, POSEIDON2_BLS_4_PARAMS,
+    };
+
+    let host = Host::test_host();
+    let field_symbol = Symbol::try_from_small_str("BLS12_381")?;
+
+    // For t = 2 and t = 3, the internal matrix is fixed, so arbitrary scalar values
+    // in mat_internal_diag_m_1 (of length t) must yield the exact same permutation output.
+    for params in [&**POSEIDON2_BLS_2_PARAMS, &**POSEIDON2_BLS_3_PARAMS] {
+        let input: Vec<BlsScalar> = (0..params.t).map(|i| BlsScalar::from(i as u64)).collect();
+        let alt_diag: Vec<BlsScalar> = (0..params.t)
+            .map(|i| BlsScalar::from((i as u64) + 999_999))
+            .collect();
+
+        let input_obj_1 = host.metered_scalar_vec_to_vecobj(input.clone())?;
+        let mat_obj_1 = host.metered_scalar_vec_to_vecobj(params.mat_internal_diag_m_1.clone())?;
+        let rc_obj_1 = vec_of_vec_to_vecobj(&host, &params.round_constants)?;
+
+        let res_canonical = host.poseidon2_permutation(
+            input_obj_1,
+            field_symbol,
+            U32Val::from(params.t as u32),
+            U32Val::from(params.d as u32),
+            U32Val::from((params.rounds_f_beginning * 2) as u32),
+            U32Val::from(params.rounds_p as u32),
+            mat_obj_1,
+            rc_obj_1,
+        )?;
+
+        let input_obj_2 = host.metered_scalar_vec_to_vecobj(input)?;
+        let mat_obj_2 = host.metered_scalar_vec_to_vecobj(alt_diag)?;
+        let rc_obj_2 = vec_of_vec_to_vecobj(&host, &params.round_constants)?;
+
+        let res_alt = host.poseidon2_permutation(
+            input_obj_2,
+            field_symbol,
+            U32Val::from(params.t as u32),
+            U32Val::from(params.d as u32),
+            U32Val::from((params.rounds_f_beginning * 2) as u32),
+            U32Val::from(params.rounds_p as u32),
+            mat_obj_2,
+            rc_obj_2,
+        )?;
+
+        assert_eq!(
+            host.obj_cmp(res_canonical.into(), res_alt.into())?,
+            Ordering::Equal as i64
+        );
+    }
+
+    // For t = 4, mat_internal_diag_m_1 is used directly, so changing its elements changes the result.
+    let params_4 = &**POSEIDON2_BLS_4_PARAMS;
+    let input_4: Vec<BlsScalar> = (0..params_4.t).map(|i| BlsScalar::from(i as u64)).collect();
+    let alt_diag_4: Vec<BlsScalar> = (0..params_4.t)
+        .map(|i| BlsScalar::from((i as u64) + 999_999))
+        .collect();
+
+    let res_4_canonical = host.poseidon2_permutation(
+        host.metered_scalar_vec_to_vecobj(input_4.clone())?,
+        field_symbol,
+        U32Val::from(params_4.t as u32),
+        U32Val::from(params_4.d as u32),
+        U32Val::from((params_4.rounds_f_beginning * 2) as u32),
+        U32Val::from(params_4.rounds_p as u32),
+        host.metered_scalar_vec_to_vecobj(params_4.mat_internal_diag_m_1.clone())?,
+        vec_of_vec_to_vecobj(&host, &params_4.round_constants)?,
+    )?;
+
+    let res_4_alt = host.poseidon2_permutation(
+        host.metered_scalar_vec_to_vecobj(input_4)?,
+        field_symbol,
+        U32Val::from(params_4.t as u32),
+        U32Val::from(params_4.d as u32),
+        U32Val::from((params_4.rounds_f_beginning * 2) as u32),
+        U32Val::from(params_4.rounds_p as u32),
+        host.metered_scalar_vec_to_vecobj(alt_diag_4)?,
+        vec_of_vec_to_vecobj(&host, &params_4.round_constants)?,
+    )?;
+
+    assert_ne!(
+        host.obj_cmp(res_4_canonical.into(), res_4_alt.into())?,
+        Ordering::Equal as i64
+    );
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod poseidon2_tests_bls12 {
     use super::*;

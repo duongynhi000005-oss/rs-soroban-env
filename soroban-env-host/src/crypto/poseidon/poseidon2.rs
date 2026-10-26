@@ -8,6 +8,20 @@ use crate::{
 };
 
 #[derive(Clone, Debug)]
+/// Implements the Poseidon2 permutation.
+///
+/// # Fixed Internal Matrix for `t = 2` and `t = 3`
+/// For state sizes `t = 2` and `t = 3`, the canonical Poseidon2 specification
+/// fixes the internal matrix $M_I$ to enable optimized additions and doublings
+/// instead of general scalar multiplications:
+/// - For `t = 2`: `[[2, 1], [1, 3]]` (corresponding to diagonal minus 1 `[1, 2]`).
+/// - For `t = 3`: `[[2, 1, 1], [1, 2, 1], [1, 1, 3]]` (corresponding to diagonal minus 1 `[1, 1, 2]`).
+///
+/// Consequently, when `t = 2` or `t = 3`, the element values in
+/// `params.mat_internal_diag_m_1` are ignored during internal matrix multiplication
+/// (`matmul_internal`), though `mat_internal_diag_m_1` must still be provided with
+/// length `t`. For `t >= 4` (`t in {4, 8, 12, 16, 20, 24}`), `mat_internal_diag_m_1`
+/// is used directly as the diagonal minus 1 of $M_I$.
 pub struct Poseidon2<F: MeteredScalar> {
     pub(crate) params: Poseidon2Params<F>,
 }
@@ -219,6 +233,14 @@ impl<F: MeteredScalar> Poseidon2<F> {
     ///
     /// The internal matrix is used during the partial S-box rounds
     /// where only the first state element goes through the S-box.
+    ///
+    /// For `t = 2` and `t = 3`, the internal matrix is fixed to the canonical
+    /// Poseidon2 matrix (`[[2, 1], [1, 3]]` for `t = 2`, and
+    /// `[[2, 1, 1], [1, 2, 1], [1, 1, 3]]` for `t = 3`) and computed directly via
+    /// additions and doublings. As a result, the scalar values of `mat_internal_diag_m_1`
+    /// are ignored for `t in {2, 3}` (only `mat_internal_diag_m_1.len() == t` is checked).
+    /// For `t >= 4`, each state element `state[i]` is multiplied by `mat_internal_diag_m_1[i]`
+    /// and added to the sum of all state elements.
     ///
     /// Reference: Section 5.2 of the Poseidon2 paper
     /// (https://eprint.iacr.org/2023/323)

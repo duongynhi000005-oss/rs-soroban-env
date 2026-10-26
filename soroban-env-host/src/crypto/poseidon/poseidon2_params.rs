@@ -7,12 +7,26 @@ use crate::{
 };
 
 #[derive(Clone, Debug)]
+/// Parameters for the Poseidon2 permutation.
+///
+/// Note that for state sizes `t = 2` and `t = 3`, the internal matrix is hardcoded
+/// to the canonical Poseidon2 specification (`[[2, 1], [1, 3]]` for `t = 2` and
+/// `[[2, 1, 1], [1, 2, 1], [1, 1, 3]]` for `t = 3`) for performance optimization.
+/// Therefore, when `t = 2` or `t = 3`, the scalar values inside `mat_internal_diag_m_1`
+/// are not read during internal matrix multiplication, although `mat_internal_diag_m_1`
+/// is still required to have length `t`.
 pub struct Poseidon2Params<F: MeteredScalar> {
     pub(crate) t: usize, // statesize
     pub(crate) d: usize, // sbox degree
     pub(crate) rounds_f_beginning: usize,
     pub(crate) rounds_p: usize,
     pub(crate) rounds: usize,
+    /// Diagonal of the internal matrix minus 1 (length `t`).
+    ///
+    /// Used directly during internal matrix multiplication for `t >= 4`.
+    /// For `t = 2` and `t = 3`, the internal matrix is fixed to `[[2, 1], [1, 3]]`
+    /// and `[[2, 1, 1], [1, 2, 1], [1, 1, 3]]` respectively, so the element values
+    /// of this vector are ignored (though its length must still equal `t`).
     pub(crate) mat_internal_diag_m_1: Vec<F>,
     pub(crate) round_constants: Vec<Vec<F>>,
 }
