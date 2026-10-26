@@ -2,7 +2,8 @@ use soroban_env_common::Env;
 
 use crate::{
     builtin_contracts::account_contract::ACCOUNT_CONTRACT_CHECK_AUTH_FN_NAME,
-    e2e_invoke::{encode_contract_events, entry_size_for_rent},
+    e2e_invoke::entry_size_for_rent,
+    events::{EventError, InternalEvent},
     fees::{FeeConfiguration, DATA_SIZE_1KB_INCREMENT, INSTRUCTIONS_INCREMENT, TTL_ENTRY_SIZE},
     ledger_info::get_key_durability,
     storage::{is_persistent_key, AccessType, Storage},
@@ -583,6 +584,10 @@ pub(crate) struct InvocationMeter {
     enabled: bool,
     stack_depth: u32,
     storage_snapshot: Storage,
+    /// Cached XDR-encoded byte size for each event in `InternalEventsBuffer`
+    /// (`0` for diagnostic events) to avoid quadratic re-externalization across
+    /// sub-invocations.
+    encoded_contract_event_sizes: Vec<u32>,
     detailed_invocation_resources: Option<DetailedInvocationResources>,
     /// When set, the meter will check that invocation resources don't exceed
     /// these limits.
@@ -732,6 +737,7 @@ impl InvocationMeter {
             // Reset all the state relevant to the invocation resource metering.
             host.budget_ref().reset()?;
             host.try_borrow_events_mut()?.clear();
+            self.encoded_contract_event_sizes.clear();
             // Note, that the storage itself shouldn't be reset, as it's treated
             // as the ledger state before invocation.
             host.try_borrow_storage_mut()?.reset_footprint();
@@ -739,7 +745,10 @@ impl InvocationMeter {
             self.stack_depth = 1;
             self.detailed_invocation_resources = Some(DetailedInvocationResources {
                 invocation,
-                resources: host.snapshot_current_resources(&self.storage_snapshot),
+                resources: host.snapshot_current_resources(
+                    &self.storage_snapshot,
+                    &mut self.encoded_contract_event_sizes,
+                ),
                 sub_call_resources: vec![],
             });
             return Ok(Some(InvocationMeterScope::new(host)));
@@ -786,7 +795,10 @@ impl InvocationMeter {
             .sub_call_resources
             .push(DetailedInvocationResources {
                 invocation: invocation.clone(),
-                resources: host.snapshot_current_resources(&self.storage_snapshot),
+                resources: host.snapshot_current_resources(
+                    &self.storage_snapshot,
+                    &mut self.encoded_contract_event_sizes,
+                ),
                 sub_call_resources: vec![],
             });
 
@@ -822,7 +834,10 @@ impl InvocationMeter {
                 })?;
         }
         current_invocation_resources.resources = host
-            .snapshot_current_resources(&self.storage_snapshot)
+            .snapshot_current_resources(
+                &self.storage_snapshot,
+                &mut self.encoded_contract_event_sizes,
+            )
             .subtract(&current_invocation_resources.resources);
 
         self.stack_depth -= 1;
@@ -937,6 +952,7 @@ impl Host {
     fn snapshot_current_resources(
         &self,
         init_storage_snapshot: &Storage,
+        encoded_contract_event_sizes: &mut Vec<u32>,
     ) -> SubInvocationResources {
         let mut invocation_resources = SubInvocationResources::default();
         let budget = self.budget_ref();
@@ -947,10 +963,13 @@ impl Host {
         // Resource measurement is best-effort, though we don't expect this to
         // ever fail.
         self.with_debug_mode(|| {
-            let _res = self.try_snapshot_storage_and_event_resources(
-                init_storage_snapshot,
-                &mut invocation_resources,
-            );
+            let _res = self.budget_ref().with_unlimited_shadow_mode(|| {
+                self.try_snapshot_storage_and_event_resources(
+                    init_storage_snapshot,
+                    encoded_contract_event_sizes,
+                    &mut invocation_resources,
+                )
+            });
             #[cfg(test)]
             _res.unwrap();
             Ok(())
@@ -962,6 +981,7 @@ impl Host {
     fn try_snapshot_storage_and_event_resources(
         &self,
         init_storage_snapshot: &Storage,
+        encoded_contract_event_sizes: &mut Vec<u32>,
         invocation_resources: &mut SubInvocationResources,
     ) -> Result<(), HostError> {
         let mut curr_storage = self.try_borrow_storage_mut()?;
@@ -969,6 +989,7 @@ impl Host {
 
         let curr_ledger_seq: u32 = self.get_ledger_sequence()?.into();
         for (key, curr_access_type) in curr_footprint.0.iter(self.budget_ref())? {
+            let is_write = matches!(curr_access_type, AccessType::ReadWrite);
             let maybe_init_entry = init_storage_snapshot.get_from_map(key, self)?;
             let mut init_entry_size_for_rent = 0;
             let mut init_live_until_ledger = curr_ledger_seq;
@@ -976,8 +997,8 @@ impl Host {
                 LedgerKey::ContractData(_) | LedgerKey::ContractCode(_) => false,
                 _ => true,
             };
-            if let Some((init_entry, init_entry_live_until)) = maybe_init_entry {
-                if let Some(live_until) = init_entry_live_until {
+            if let Some((_, init_entry_live_until)) = &maybe_init_entry {
+                if let Some(live_until) = *init_entry_live_until {
                     if live_until >= curr_ledger_seq {
                         // Only bump `init_live_until_ledger` to a value higher than the current
                         // ledger in order to get the appropriate rent bump amount.
@@ -989,33 +1010,44 @@ impl Host {
                         is_disk_read = is_persistent_key(key.as_ref());
                     }
                 }
+            }
+            let maybe_entry = curr_storage.try_get_full(key, self, None)?;
+            let entry_live_until_ledger =
+                maybe_entry.as_ref().and_then(|(_, live_until)| *live_until);
+            let has_ttl_extension = entry_live_until_ledger.map_or(false, |new_live_until| {
+                new_live_until > init_live_until_ledger
+            });
 
-                let mut buf = Vec::<u8>::new();
-                metered_write_xdr(self.budget_ref(), init_entry.as_ref(), &mut buf)?;
-                if is_disk_read {
-                    invocation_resources.disk_read_bytes += buf.len() as i32;
+            if is_disk_read || is_write || has_ttl_extension {
+                if let Some((init_entry, _)) = maybe_init_entry {
+                    let mut buf = Vec::<u8>::new();
+                    metered_write_xdr(self.budget_ref(), init_entry.as_ref(), &mut buf)?;
+                    if is_disk_read {
+                        invocation_resources.disk_read_bytes += buf.len() as i32;
+                    }
+                    if is_write || has_ttl_extension {
+                        init_entry_size_for_rent =
+                            entry_size_for_rent(self.budget_ref(), &init_entry, buf.len() as u32)?;
+                    }
                 }
-                init_entry_size_for_rent =
-                    entry_size_for_rent(self.budget_ref(), &init_entry, buf.len() as u32)?;
             }
             let mut entry_size = 0;
             let mut new_entry_size_for_rent = 0;
-            let mut entry_live_until_ledger = None;
-            let maybe_entry = curr_storage.try_get_full(key, self, None)?;
-            if let Some((entry, entry_live_until)) = maybe_entry {
-                let mut buf = Vec::<u8>::new();
-                metered_write_xdr(self.budget_ref(), entry.as_ref(), &mut buf)?;
-                entry_size = buf.len() as u32;
-                new_entry_size_for_rent =
-                    entry_size_for_rent(self.budget_ref(), &entry, entry_size)?;
-                entry_live_until_ledger = entry_live_until;
+            if is_write || has_ttl_extension {
+                if let Some((entry, _)) = maybe_entry {
+                    let mut buf = Vec::<u8>::new();
+                    metered_write_xdr(self.budget_ref(), entry.as_ref(), &mut buf)?;
+                    entry_size = buf.len() as u32;
+                    new_entry_size_for_rent =
+                        entry_size_for_rent(self.budget_ref(), &entry, entry_size)?;
+                }
             }
             if is_disk_read {
                 invocation_resources.disk_read_entries += 1;
             } else {
                 invocation_resources.memory_read_entries += 1;
             }
-            if matches!(curr_access_type, AccessType::ReadWrite) {
+            if is_write {
                 invocation_resources.write_entries += 1;
                 invocation_resources.write_bytes += entry_size as i32;
             }
@@ -1045,10 +1077,23 @@ impl Host {
                 }
             }
         }
-        let events = self.try_borrow_events()?.externalize(self)?;
-        let encoded_contract_events = encode_contract_events(self.budget_ref(), &events)?;
-        for event in &encoded_contract_events {
-            invocation_resources.contract_events_size_bytes += event.len() as i32;
+        let events_buf = &self.try_borrow_events()?.vec;
+        for (event, _) in events_buf.iter().skip(encoded_contract_event_sizes.len()) {
+            let size = match event {
+                InternalEvent::Contract(c) => {
+                    let xdr_event = c.to_xdr(self)?;
+                    let mut buf = Vec::<u8>::new();
+                    metered_write_xdr(self.budget_ref(), &xdr_event, &mut buf)?;
+                    buf.len() as u32
+                }
+                InternalEvent::Diagnostic(_) => 0,
+            };
+            encoded_contract_event_sizes.push(size);
+        }
+        for ((_, status), &size) in events_buf.iter().zip(encoded_contract_event_sizes.iter()) {
+            if *status == EventError::FromSuccessfulCall && size > 0 {
+                invocation_resources.contract_events_size_bytes += size as i32;
+            }
         }
         Ok(())
     }
@@ -1974,5 +2019,93 @@ mod test {
                 failed_call: false,
             }"#]]
         .assert_eq(format!("{:#?}", diag_events.0.last().unwrap()).as_str());
+    }
+
+    #[test]
+    fn test_call_heavy_sub_invocations_do_not_exhaust_shadow_budget() {
+        use crate::{ContractFunctionSet, InvocationEvent, Val};
+        use std::rc::Rc;
+
+        struct FanOutContract {
+            callee: AddressObject,
+        }
+
+        impl ContractFunctionSet for FanOutContract {
+            fn call(&self, func: &Symbol, host: &Host, args: &[Val]) -> Option<Val> {
+                if SymbolStr::try_from_val(host, func).unwrap().to_string() != "fan_out" {
+                    return Some(().into());
+                }
+                let n: u32 = args[0].try_into_val(host).unwrap();
+                let key = Symbol::try_from_small_str("key_1").unwrap();
+                let fn_name = Symbol::try_from_val(host, &"has_persistent").unwrap();
+                let call_args = test_vec![host, key].into();
+                for _ in 0..n {
+                    host.call(self.callee, fn_name, call_args).unwrap();
+                }
+                Some(n.into())
+            }
+        }
+
+        let host = Host::test_host_with_recording_footprint();
+        host.enable_invocation_metering();
+        host.enable_debug().unwrap();
+        host.with_mut_ledger_info(|li| {
+            li.sequence_number = 100;
+            li.max_entry_ttl = 10000;
+            li.min_persistent_entry_ttl = 1000;
+            li.min_temp_entry_ttl = 16;
+        })
+        .unwrap();
+        host.set_invocation_hook(Some(Rc::new(|host, event| {
+            if matches!(event, InvocationEvent::Finish) {
+                let _ = host.get_authenticated_authorizations().unwrap();
+            }
+        })))
+        .unwrap();
+
+        let callee = host.register_test_contract_wasm(CONTRACT_STORAGE);
+        let caller = host
+            .add_host_object(ScAddress::Contract(ContractId(Hash([9u8; 32]))))
+            .unwrap();
+        host.register_test_contract(caller, Rc::new(FanOutContract { callee }))
+            .unwrap();
+
+        let res = host
+            .call(
+                caller,
+                Symbol::try_from_small_str("fan_out").unwrap(),
+                test_vec![&host, 150_u32].into(),
+            )
+            .unwrap();
+        let count: u32 = res.try_into_val(&host).unwrap();
+        assert_eq!(count, 150);
+        assert_eq!(
+            host.get_detailed_last_invocation_resources()
+                .unwrap()
+                .sub_call_resources
+                .len(),
+            150
+        );
+        assert!(!host.budget_ref().shadow_cpu_limit_exceeded().unwrap());
+        assert!(!host.budget_ref().shadow_mem_limit_exceeded().unwrap());
+
+        // Even when shadow limits are explicitly set below the shadow usage,
+        // `get_authenticated_authorizations` in the post-invocation hook and
+        // `InvocationMeter` resource snapshots must not panic with
+        // `Error(Budget, ExceededLimit)`.
+        host.set_shadow_budget_limits(100, 100).unwrap();
+        let res = host
+            .call(
+                caller,
+                Symbol::try_from_small_str("fan_out").unwrap(),
+                test_vec![&host, 10_u32].into(),
+            )
+            .unwrap();
+        let count: u32 = res.try_into_val(&host).unwrap();
+        assert_eq!(count, 10);
+        assert!(
+            host.budget_ref().shadow_cpu_limit_exceeded().unwrap()
+                || host.budget_ref().shadow_mem_limit_exceeded().unwrap()
+        );
     }
 }

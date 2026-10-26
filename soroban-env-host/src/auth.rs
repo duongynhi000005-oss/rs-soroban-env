@@ -1790,7 +1790,7 @@ impl AuthorizationManager {
         host: &Host,
     ) -> Vec<(ScAddress, xdr::SorobanAuthorizedInvocation)> {
         host.as_budget()
-            .with_observable_shadow_mode(|| {
+            .with_unlimited_shadow_mode(|| {
                 self.account_trackers
                     .borrow()
                     .iter()
@@ -1807,7 +1807,7 @@ impl AuthorizationManager {
                     })
                     .metered_collect(host)
             })
-            .unwrap()
+            .expect("failed to get authenticated authorizations")
     }
 }
 

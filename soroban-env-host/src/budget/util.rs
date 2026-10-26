@@ -213,4 +213,34 @@ impl Budget {
 
         rt
     }
+
+    #[cfg(any(test, feature = "testutils"))]
+    pub(crate) fn with_unlimited_shadow_mode<T, F>(&self, f: F) -> Result<T, HostError>
+    where
+        F: FnOnce() -> Result<T, HostError>,
+    {
+        let mut prev_mode = false;
+        let mut prev_cpu_shadow_limit = 0;
+        let mut prev_mem_shadow_limit = 0;
+        self.with_mut_budget(|mut b| {
+            prev_mode = b.is_in_shadow_mode;
+            prev_cpu_shadow_limit = b.cpu_insns.shadow_limit;
+            prev_mem_shadow_limit = b.mem_bytes.shadow_limit;
+            b.is_in_shadow_mode = true;
+            b.cpu_insns.shadow_limit = u64::MAX;
+            b.mem_bytes.shadow_limit = u64::MAX;
+            Ok(())
+        })?;
+
+        let rt = f();
+
+        self.with_mut_budget(|mut b| {
+            b.is_in_shadow_mode = prev_mode;
+            b.cpu_insns.shadow_limit = prev_cpu_shadow_limit;
+            b.mem_bytes.shadow_limit = prev_mem_shadow_limit;
+            Ok(())
+        })?;
+
+        rt
+    }
 }

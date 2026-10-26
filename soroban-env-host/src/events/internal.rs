@@ -21,7 +21,7 @@ pub(crate) struct InternalContractEvent {
 
 impl InternalContractEvent {
     // Metering: covered by components
-    fn to_xdr(&self, host: &Host) -> Result<xdr::ContractEvent, HostError> {
+    pub(crate) fn to_xdr(&self, host: &Host) -> Result<xdr::ContractEvent, HostError> {
         let topics = host.vecobject_to_scval_vec(self.topics)?;
         let data = host.from_host_val(self.data)?;
         let contract_id = match self.contract_id {
